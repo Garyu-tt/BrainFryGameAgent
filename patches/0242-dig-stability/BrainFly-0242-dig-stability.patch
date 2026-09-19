@@ -1,0 +1,136 @@
+--- a/minecraft/embodied-agency.mjs
++++ b/minecraft/embodied-agency.mjs
+@@ -188,6 +188,42 @@
+   teacherTarget(teacher,reach=6){try{const b=this.bot.blockAtEntityCursor?.(teacher,reach);if(b&&b.name!=='air')return b;}catch{}return null;}
+   updateTeacherFocus(teacher){const b=this.teacherTarget(teacher,Number(this.config.teaching?.interaction_reach)||6);if(!b){this.teacherFocus=null;return null;}const name=ns(b.name),p=b.position?{x:b.position.x,y:b.position.y,z:b.position.z}:null;if(!this.teacherFocus||this.teacherFocus.name!==name||JSON.stringify(this.teacherFocus.position)!==JSON.stringify(p)){this.teacherFocus={name,position:p,since:Date.now()};this.episodic?.record({actor:this.config.teaching?.teacher_username||'teacher',kind:'focus',block:name,position:p});this.log('teach.focus',{block:name,position:p});}return this.teacherFocus;}
+   findMatchingBlock(name,maxDistance=24){const id=this.bot?.registry?.blocksByName?.[bare(name)]?.id;if(id==null)return null;try{return this.bot.findBlock({matching:id,maxDistance})}catch{return null}}
++  blockCenterDistance(block){
++    const p=this.bot?.entity?.position,c=pointCenter(block);if(!p||!c)return Infinity;
++    const eyeY=Number(p.y)+(Number.isFinite(Number(this.bot?.entity?.height))?Number(this.bot.entity.height)*.9:1.62);return Math.hypot(Number(c.x)-Number(p.x),Number(c.y)-eyeY,Number(c.z)-Number(p.z));
++  }
++  blockVisible(block){if(!block)return false;try{if(typeof this.bot?.canSeeBlock==='function')return !!this.bot.canSeeBlock(block);}catch{}return null;}
++  blockDiggable(block){if(!block)return false;try{if(typeof this.bot?.canDigBlock==='function')return !!this.bot.canDigBlock(block);}catch{}return this.blockCenterDistance(block)<=4.45;}
++  freshBlock(block,allowedIds=null){
++    if(!block?.position||!this.bot)return null;let fresh=null;try{fresh=this.bot.blockAt?.(block.position)||null}catch{}
++    if(!fresh||fresh.name==='air')return null;if(allowedIds?.size&&!allowedIds.has(fresh.type))return null;return fresh;
++  }
++  findMineTarget(allowedIds,maxDistance=32,{count=48}={}){
++    if(!this.bot?.entity||!allowedIds?.size)return null;const rows=[];
++    try{if(typeof this.bot.findBlocks==='function'){for(const pos of this.bot.findBlocks({matching:b=>allowedIds.has(b.type),maxDistance,count})||[]){const b=this.bot.blockAt?.(pos);if(b&&b.name!=='air'&&allowedIds.has(b.type))rows.push(b);}}}catch{}
++    if(!rows.length){try{const b=this.bot.findBlock({matching:x=>allowedIds.has(x.type),maxDistance});if(b)rows.push(b);}catch{}}
++    if(!rows.length)return null;
++    return rows.sort((a,b)=>{const av=this.blockVisible(a),bv=this.blockVisible(b),ad=this.blockCenterDistance(a),bd=this.blockCenterDistance(b),ag=this.blockDiggable(a),bg=this.blockDiggable(b);const ar=(ag&&av!==false)?0:(av===false?2:1),br=(bg&&bv!==false)?0:(bv===false?2:1);return ar-br||ad-bd;})[0]||null;
++  }
++  async prepareMineTarget(target,allowedIds,{label='mine'}={}){
++    if(!target)return {ok:false,reason:'raw_not_visible'};let block=this.freshBlock(target,allowedIds)||target;
++    const needsApproach=()=>!this.blockDiggable(block)||this.blockVisible(block)===false;
++    if(needsApproach()){
++      const nav=await this.navigateTo(block.position,{range:2.35,label:`${label}:reach`,canDig:false});
++      if(!nav?.ok)return {ok:false,reason:nav?.reason||'raw_not_reachable',navigation:nav};
++      block=this.freshBlock(block,allowedIds)||this.findMineTarget(allowedIds,8,{count:24});
++      if(!block)return {ok:false,reason:'raw_target_gone'};
++    }
++    this.stopNativeNavigation();try{this.bot?.clearControlStates?.()}catch{}
++    await sleep(Number(this.config.navigation?.dig_settle_ms??90));
++    block=this.freshBlock(block,allowedIds)||this.findMineTarget(allowedIds,7,{count:24});if(!block)return {ok:false,reason:'raw_target_gone'};
++    try{await this.bot.lookAt(pointCenter(block),true)}catch{}
++    await sleep(Number(this.config.navigation?.dig_aim_settle_ms??45));
++    block=this.freshBlock(block,allowedIds)||block;const reach=this.blockCenterDistance(block),visible=this.blockVisible(block),diggable=this.blockDiggable(block);
++    if(!diggable)return {ok:false,reason:'raw_not_reachable',reach:+reach.toFixed(2),block};
++    if(visible===false)return {ok:false,reason:'raw_not_visible',reach:+reach.toFixed(2),block};
++    return {ok:true,block,reach:+reach.toFixed(2),visible};
++  }
+   scheduleImitation(kind,teacher,extra={}){
+     if(kind==='equip'){const item=extra.item?ns(extra.item):null,slot=normalizeEquipmentSlot(extra.slot)||this.inventorySkills.slotFor(item);if(!item||item==='minecraft:air'||!slot)return false;this.pendingImitation={kind,item,slot,created:Date.now(),expires:Date.now()+15000};this.episodic?.record({actor:this.config.teaching?.teacher_username||'teacher',kind:'demonstrate',action:'equip',item,slot});this.log('teach.imitate_scheduled',{kind,item,slot});return true;}
+     if(kind==='eat'||kind==='use_item'){const item=extra.item?ns(extra.item):null;if(!item||item==='minecraft:air')return false;this.pendingImitation={kind,item,created:Date.now(),expires:Date.now()+15000};this.episodic?.record({actor:this.config.teaching?.teacher_username||'teacher',kind:'demonstrate',action:kind,item});this.log('teach.imitate_scheduled',{kind,item});return true;}
+@@ -219,10 +255,13 @@
+   }
+   rawBlockCandidates(item){const n=bare(item),out=[n];const aliases={cobblestone:['stone'],coal:['coal_ore','deepslate_coal_ore'],raw_iron:['iron_ore','deepslate_iron_ore'],raw_copper:['copper_ore','deepslate_copper_ore'],raw_gold:['gold_ore','deepslate_gold_ore'],diamond:['diamond_ore','deepslate_diamond_ore'],redstone:['redstone_ore','deepslate_redstone_ore'],lapis_lazuli:['lapis_ore','deepslate_lapis_ore'],emerald:['emerald_ore','deepslate_emerald_ore'],flint:['gravel']};for(const x of aliases[n]||[])out.push(x);return [...new Set(out)];}
+   async acquireRaw(item){
+-    if(!this.bot?.entity)return {ok:false,reason:'no_bot'};const radius=Number(this.config.homeostasis?.search_radius??32);let target=null;
+-    const candidates=this.rawBlockCandidates(item),ids=new Set(candidates.map(n=>this.bot.registry?.blocksByName?.[n]?.id).filter(x=>x!=null));if(ids.size)try{target=this.bot.findBlock({matching:b=>ids.has(b.type),maxDistance:radius});}catch{}
+-    if(!target){let known=null;for(const n of candidates){const k=this.knownBlock(n,256);if(k&&(!known||k.distance<known.distance))known={...k,name:n};}if(known){this.rawSeekTarget=ns(known.name);await this.navigateTo(known,{range:4,label:`remembered:${known.name}`,canDig:true});return {ok:false,reason:'going_to_remembered_raw',item:ns(item),block:ns(known.name),position:{x:known.x,y:known.y,z:known.z}};}return {ok:false,reason:'raw_not_visible',item:ns(item)};}this.rawSeekTarget=ns(target.name);const d=this.bot.entity.position.distanceTo(target.position);if(d>4.1){const nav=await this.navigateTo(target.position,{range:3.5,label:`raw:${target.name}`,canDig:true});return {ok:false,reason:nav?.ok?'approached_raw':(nav?.reason||'approaching_raw'),item:ns(item),block:ns(target.name)};}
+-    try{this.busy=true;await this.bot.lookAt(pointCenter(target),true);await this.equipBestTool(target);await this.bot.dig(target);this.episodic?.record({actor:this.bot.username||'BrainFly',kind:'acquire_raw',item:ns(item),block:ns(target.name),canonical:true});this.log('agency.acquire_raw',{item:ns(item),block:ns(target.name)});return {ok:false,reason:'waiting_pickup',item:ns(item)};}catch(e){return {ok:false,reason:'dig_failed',error:String(e)}}finally{this.busy=false}
++    if(!this.bot?.entity)return {ok:false,reason:'no_bot'};const radius=Number(this.config.homeostasis?.search_radius??32);
++    const candidates=this.rawBlockCandidates(item),ids=new Set(candidates.map(n=>this.bot.registry?.blocksByName?.[n]?.id).filter(x=>x!=null));let target=this.findMineTarget(ids,radius);
++    if(!target){let known=null;for(const n of candidates){const k=this.knownBlock(n,256);if(k&&(!known||k.distance<known.distance))known={...k,name:n};}if(known){this.rawSeekTarget=ns(known.name);const nav=await this.navigateTo(known,{range:3.1,label:`remembered:${known.name}`,canDig:false});return {ok:false,reason:nav?.ok?'approached_remembered_raw':(nav?.reason||'going_to_remembered_raw'),item:ns(item),block:ns(known.name),position:{x:known.x,y:known.y,z:known.z}};}return {ok:false,reason:'raw_not_visible',item:ns(item)};}
++    this.rawSeekTarget=ns(target.name);const initialReach=this.blockCenterDistance(target),initialVisible=this.blockVisible(target),initialDiggable=this.blockDiggable(target);
++    if(!initialDiggable||initialVisible===false){const nav=await this.navigateTo(target.position,{range:2.35,label:`raw:${target.name}`,canDig:false});if(!nav?.ok)return {ok:false,reason:nav?.reason||'approaching_raw',item:ns(item),block:ns(target.name)};target=this.freshBlock(target,ids)||this.findMineTarget(ids,8,{count:24});if(!target)return {ok:false,reason:'raw_target_gone',item:ns(item)};}
++    const prepared=await this.prepareMineTarget(target,ids,{label:`raw:${target.name}`});if(!prepared.ok)return {...prepared,item:ns(item),block:prepared.block?ns(prepared.block.name):ns(target.name)};target=prepared.block;
++    try{this.busy=true;await this.equipBestTool(target);const digMs=(()=>{try{return Number(target.digTime?.(this.bot.heldItem?.type??null))||0}catch{return 0}})();const timeout=Math.max(2500,Math.min(15000,digMs>0?digMs+2500:8000));await withTimeout(this.bot.dig(target),timeout,'raw_dig_timeout');this.episodic?.record({actor:this.bot.username||'BrainFly',kind:'acquire_raw',item:ns(item),block:ns(target.name),position:target.position?{x:target.position.x,y:target.position.y,z:target.position.z}:null,canonical:true});this.log('agency.acquire_raw',{item:ns(item),block:ns(target.name),reach:prepared.reach,visible:prepared.visible,timeout_ms:timeout});return {ok:false,reason:'waiting_pickup',item:ns(item),block:ns(target.name)};}catch(e){const reach=this.blockCenterDistance(target),visible=this.blockVisible(target);this.log('agency.acquire_raw_error',{item:ns(item),block:ns(target?.name),reach:Number.isFinite(reach)?+reach.toFixed(2):null,visible,error:String(e)});return {ok:false,reason:'dig_failed',error:String(e),item:ns(item),block:ns(target?.name),reach:Number.isFinite(reach)?+reach.toFixed(2):null,visible}}finally{this.busy=false}
+   }
+   async placeCraftingTable(){const table=this.bot.inventory?.items?.().find(x=>x.name==='crafting_table');if(!table)return null;const p=this.bot.entity?.position;if(!p)return null;for(const [x,z] of [[1,0],[-1,0],[0,1],[0,-1]]){const ref=this.bot.blockAt(p.offset(x,-1,z)),air=this.bot.blockAt(p.offset(x,0,z));if(ref&&ref.boundingBox!=='empty'&&air&&air.name==='air'){try{await this.bot.equip(table,'hand');await this.bot.placeBlock(ref,{x:0,y:1,z:0});await sleep(250);const b=this.bot.blockAt(p.offset(x,0,z));if(b?.name==='crafting_table'){this.episodic?.record({actor:this.bot.username||'BrainFly',kind:'place',block:'minecraft:crafting_table',reason:'crafting_need'});return b;}}catch{}}}return null;}
+   nearbyTable(){const id=this.bot?.registry?.blocksByName?.crafting_table?.id;if(id==null)return null;try{return this.bot.findBlock({matching:id,maxDistance:5})}catch{return null}}
+--- a/minecraft/autonomy-supervisor.mjs
++++ b/minecraft/autonomy-supervisor.mjs
+@@ -56,7 +56,7 @@
+     const goal=this.agency?.goal,gs=this.agency?.goalStatus?.();if(!goal||!gs?.last_reason)return null;const reason=String(gs.last_reason),key=`${goal}|${reason}`,attemptAt=Number(gs.last_attempt||0);if(attemptAt&&attemptAt===this.lastGoalAttemptSeen)return null;this.lastGoalAttemptSeen=attemptAt;this.lastGoalKey=key;this.lastGoalReason=reason;const f=this.bumpFailure(goal,reason);if(Date.now()-Number(f.last_at||0)<0)return null;const wait=this.backoff(f);if(Date.now()-Number(f.first_at||0)<Math.min(wait,2500)&&f.count>1)return null;this.lastRemedyAt=Date.now();
+     const missing=bare(gs?.last_result?.item||gs?.last_result?.plan_step||goal||'');
+     if(/material_unresolved|plan_material_unresolved/.test(reason)){const r=await this.agency.acquireAnyWood();this.log('autonomy.remedy',{goal,reason,remedy:'acquire_any_wood',result:r?.reason});return r;}
+-    if(/raw_not_visible/.test(reason)){
++    if(/raw_not_visible|raw_not_reachable|raw_target_gone/.test(reason)){
+       if(missing==='iron_ingot'||missing==='gold_ingot'||missing==='copper_ingot'){
+         const raw=missing==='iron_ingot'?'raw_iron':missing==='gold_ingot'?'raw_gold':'raw_copper';if(this.itemCount(raw)>0){const r=await this.agency.smeltItem(raw,missing,Math.max(1,this.itemCount(missing)+1));this.log('autonomy.remedy',{goal,reason,remedy:'smelt_dependency',dependency:missing,result:r?.reason});return r;}const r=await this.agency.acquireRaw(raw);this.log('autonomy.remedy',{goal,reason,remedy:'mine_smelt_input',dependency:raw,result:r?.reason});return r;
+       }
+@@ -66,7 +66,7 @@
+     }
+     if(/station_missing|station_place_failed/.test(reason)){const station=gs?.last_result?.station||'minecraft:crafting_table';const r=await this.agency.ensureStation(station);this.log('autonomy.remedy',{goal,reason,remedy:'ensure_station',station,result:r?.reason});return r;}
+     if(/navigation_unavailable/.test(reason))return {ok:false,reason:'blocked_navigation_dependency'};
+-    if(/path_failed|raw_not_visible|dig_failed/.test(reason)){const r=await this.agency.explore({label:`goal:${bare(goal)}`,radiusBase:24,maxRadius:160});this.log('autonomy.remedy',{goal,reason,remedy:'explore',result:r?.reason});return r;}
++    if(/path_failed|raw_not_visible|raw_not_reachable|raw_target_gone|dig_failed/.test(reason)){const r=await this.agency.explore({label:`goal:${bare(goal)}`,radiusBase:24,maxRadius:160});this.log('autonomy.remedy',{goal,reason,remedy:'explore',result:r?.reason});return r;}
+     if(/craft_backend_(fault|requires_reset)/.test(reason)){
+       const item=bare(goal),row=this.state.craft_resets[item]||{count:0,last:0};if(row.count<1||Date.now()-row.last>Number(this.config.autonomy?.craft_reset_retry_ms??900000)){row.count++;row.last=Date.now();this.state.craft_resets[item]=row;this.agency.crafting.reset();this.agency.resumeGoal();this.save();this.log('autonomy.craft_reset_once',{goal,count:row.count});return {ok:false,reason:'craft_backend_reset_once'};}return {ok:false,reason:'craft_quarantined'};
+     }
+--- a/package.json
++++ b/package.json
+@@ -2,7 +2,7 @@
+   "name": "brain-workbench-minecraft",
+   "private": true,
+   "type": "module",
+-  "version": "2026.09.19-0241",
++  "version": "2026.09.19-0242",
+   "scripts": {
+     "brain": "node runtime/brain-runtime.mjs",
+     "minecraft": "node minecraft/minecraft-bridge.mjs",
+--- /dev/null	2026-09-19 16:59:45.484309551 +0000
++++ b/tools/test_raw_dig_reach_los.mjs	2026-09-19 17:04:56.304811227 +0000
+@@ -0,0 +1,39 @@
++import assert from 'node:assert/strict'
++import fs from 'node:fs'
++import os from 'node:os'
++import path from 'node:path'
++import { EmbodiedAgency } from '../minecraft/embodied-agency.mjs'
++
++const root=fs.mkdtempSync(path.join(os.tmpdir(),'brainfly-raw-dig-'))
++fs.mkdirSync(path.join(root,'minecraft','memory'),{recursive:true})
++const pos={x:0,y:64,z:0}
++const blockPos={x:3,y:64,z:0}
++const stale={name:'oak_log',type:1,position:blockPos,boundingBox:'block',digTime:()=>120}
++const fresh={name:'oak_log',type:1,position:blockPos,boundingBox:'block',digTime:()=>120}
++let navigations=0,digs=0,clears=0
++const bot={
++  username:'BrainFly',
++  entity:{position:pos,height:1.8,effects:{}},
++  game:{dimension:'overworld'},
++  registry:{blocksByName:{oak_log:{id:1}},itemsByName:{oak_log:{id:101}}},
++  inventory:{items:()=>[]},
++  heldItem:null,
++  findBlock:()=>stale,
++  blockAt:p=>Number(p?.x)===3&&Number(p?.y)===64&&Number(p?.z)===0?fresh:null,
++  canSeeBlock:()=>pos.x>=1,
++  canDigBlock:()=>pos.x>=1,
++  lookAt:async()=>{},
++  clearControlStates(){clears++},
++  setControlState(){},
++  unequip:async()=>{},
++  dig:async b=>{digs++;assert.equal(b,fresh,'must dig a freshly re-read world block, not stale findBlock result')}
++}
++const agency=new EmbodiedAgency({root,config:{navigation:{dig_settle_ms:0,dig_aim_settle_ms:0}},log:()=>{}})
++agency.bot=bot
++agency.navigateTo=async()=>{navigations++;pos.x=1;return {ok:true,reason:'test_arrived'}}
++const r=await agency.acquireRaw('oak_log')
++assert.equal(r.reason,'waiting_pickup',JSON.stringify(r))
++assert.equal(navigations,1,'invisible target inside naive distance must trigger an approach')
++assert.equal(digs,1)
++assert.ok(clears>=1,'movement must be stopped before dig')
++console.log('PASS raw dig reach/LOS stabilization',r)
