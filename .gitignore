@@ -1,0 +1,16 @@
+node_modules/
+logs/
+snapshots/
+minecraft/memory/
+minecraft/config.json
+minecraft/behavior-memory.json
+minecraft/episodic-memory.json
+*.brainstate
+*.brainstate.tmp
+runtime/data/graph_w3.bin
+runtime/data/neurons.bin
+runtime/data/neuron_size.bin
+runtime/data/ntsign.bin
+runtime/data/meta.json
+dist/
+gui/build/
