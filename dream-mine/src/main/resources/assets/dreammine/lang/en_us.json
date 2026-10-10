@@ -1,0 +1,7 @@
+{
+  "item.dreammine.dream_spawn_egg": "Dream Spawn Egg",
+  "tooltip.dreammine.egg.unlimited": "Unlimited manual spawns. Automatic population: one Dream.",
+  "tooltip.dreammine.egg.lag": "WARNING: Many Dream mobs can cause severe server lag!",
+  "tooltip.dreammine.egg.rename": "Rename the egg in an anvil: Nick@SkinAccount",
+  "message.dreammine.lag": "WARNING: %s manually spawned Dreams. Large populations may cause severe lag!"
+}

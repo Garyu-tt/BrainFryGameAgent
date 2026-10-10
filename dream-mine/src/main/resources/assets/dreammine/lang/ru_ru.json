@@ -1,0 +1,7 @@
+{
+  "item.dreammine.dream_spawn_egg": "Яйцо появления Dream",
+  "tooltip.dreammine.egg.unlimited": "Ручной призыв: без лимита. Автопоявление: 1 Dream.",
+  "tooltip.dreammine.egg.lag": "ВНИМАНИЕ: большое количество Dream может вызвать сильные лаги!",
+  "tooltip.dreammine.egg.rename": "Переименуйте яйцо на наковальне: Ник@ИмяСкина",
+  "message.dreammine.lag": "ВНИМАНИЕ: создано %s Dream вручную. Большое количество мобов может вызвать сильные лаги!"
+}

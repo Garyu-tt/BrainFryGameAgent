@@ -1,0 +1,27 @@
+modLoader="javafml"
+loaderVersion="[1,)"
+license="MIT"
+[[mods]]
+modId="dreammine"
+version="0.1.5"
+displayName="Dream Mine"
+authors="Mirbi"
+description='''A self-contained local learning Fake Player companion with a generational memory and a 100-block player tether. Unofficial fan project.'''
+[[dependencies.dreammine]]
+modId="minecraft"
+type="required"
+versionRange="[1.21.1,1.21.2)"
+ordering="NONE"
+side="BOTH"
+[[dependencies.dreammine]]
+modId="neoforge"
+type="required"
+versionRange="[21.1.257,)"
+ordering="NONE"
+side="BOTH"
+[[dependencies.dreammine]]
+modId="players"
+type="required"
+versionRange="[2.2.0,2.3.0)"
+ordering="AFTER"
+side="BOTH"
