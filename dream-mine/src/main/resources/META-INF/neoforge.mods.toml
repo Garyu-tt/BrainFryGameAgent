@@ -3,7 +3,7 @@ loaderVersion="[1,)"
 license="MIT"
 [[mods]]
 modId="dreammine"
-version="0.1.5"
+version="0.1.6"
 displayName="Dream Mine"
 authors="Mirbi"
 description='''A self-contained local learning Fake Player companion with a generational memory and a 100-block player tether. Unofficial fan project.'''

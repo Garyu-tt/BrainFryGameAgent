@@ -32,6 +32,23 @@ public final class LearningMind {
         return choose(safe,random,null);
     }
     /** Shared local knowledge policy is consulted live, not only at birth. */
+    public int choose(boolean[] safe, RandomGenerator random,double[] shared,double[] curiosity) {
+        if(curiosity==null || curiosity.length!=ACTIONS.length)
+            throw new IllegalArgumentException("bad curiosity array");
+        if(safe==null||safe.length!=ACTIONS.length)throw new IllegalArgumentException("bad safe mask");
+        int chosen=-1;
+        double best=Double.NEGATIVE_INFINITY;
+        for(int i=0;i<safe.length;i++){
+            if(!safe[i])continue;
+            double sharedScore=shared!=null && shared.length==ACTIONS.length?clamp(shared[i],-2,2):rewards[i];
+            double score=0.45*rewards[i]+0.25*sharedScore
+                         +clamp(curiosity[i],-3,3)
+                         +0.25/Math.sqrt(1+observations[i])+random.nextDouble()*0.12;
+            if(score>best){best=score;chosen=i;}
+        }
+        return chosen;
+    }
+
     public int choose(boolean[] safe, RandomGenerator random,double[] shared) {
         if(safe==null||safe.length!=ACTIONS.length)throw new IllegalArgumentException("bad safe mask");
         int chosen=-1;

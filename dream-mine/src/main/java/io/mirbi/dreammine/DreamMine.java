@@ -2,6 +2,10 @@ package io.mirbi.dreammine;
 
 import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.LongTag;
+import net.minecraft.nbt.Tag;
+import java.util.logging.Logger;
+
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.neoforge.event.BuildCreativeModeTabContentsEvent;
 import net.neoforged.neoforge.registries.DeferredRegister;
@@ -52,10 +56,18 @@ public final class DreamMine {
     private static final String SLEEP = "dreammine_sleep";
     private static final int[][] DIRECTIONS = {{0,-1},{1,-1},{1,0},{1,1},{0,1},{-1,1},{-1,0},{-1,-1}};
     private static final Map<UUID, Brain> BRAINS = new ConcurrentHashMap<>();
+    private static final Logger LOGGER = Logger.getLogger("DreamMine");
+    private static final String CONTROLLER = "dreammine_controller_v016";
+
 
     private static class Brain {
         final LearningMind mind;
         final ArrayDeque<CompoundTag> privateEpisodes=new ArrayDeque<>();
+        final LinkedHashSet<Long> visitedCells = new LinkedHashSet<>();
+        String goal = "BOOT";
+        long decisions=0;
+        long lastDecisionTick=0;
+
         int last = -1;
         double lastX, lastZ;
         long next = 0, encounterAt = -10000;
@@ -73,6 +85,25 @@ public final class DreamMine {
             var episodes=privateMemory.getList("episodes",net.minecraft.nbt.Tag.TAG_COMPOUND);
             for(int i=Math.max(0,episodes.size()-32);i<episodes.size();i++)
                 privateEpisodes.addLast(episodes.getCompound(i).copy());
+            var cells=privateMemory.getList("visitedCells",Tag.TAG_LONG);
+            for(int i=Math.max(0,cells.size()-64);i<cells.size();i++)
+                visitedCells.add(((LongTag)cells.get(i)).getAsLong());
+
+        }
+        void visited(FakePlayerEntity dream) {
+            BlockPos pos=dream.blockPosition();
+            // Spatial hash of 8x8-block regions; bounded per entity to 64 cells.
+            long key=(((long)Math.floorDiv(pos.getX(),8))<<32)
+                     ^ (((long)Math.floorDiv(pos.getZ(),8)) & 0xffffffffL);
+            if(visitedCells.add(key)){
+                while(visitedCells.size()>64)visitedCells.remove(visitedCells.iterator().next());
+                persist(dream);
+            }
+        }
+        boolean hasVisited(BlockPos pos){
+            long key=(((long)Math.floorDiv(pos.getX(),8))<<32)
+                     ^ (((long)Math.floorDiv(pos.getZ(),8)) & 0xffffffffL);
+            return visitedCells.contains(key);
         }
         void remember(FakePlayerEntity dream,int direction,double reward){
             mind.observe(direction,reward);
@@ -92,6 +123,10 @@ public final class DreamMine {
             var episodes=new net.minecraft.nbt.ListTag();
             for(var entry:privateEpisodes)episodes.add(entry.copy());
             tag.put("episodes",episodes);
+            var cells=new net.minecraft.nbt.ListTag();
+            for(long cell:visitedCells)cells.add(LongTag.valueOf(cell));
+            tag.put("visitedCells",cells);
+
             dream.getPersistentData().put(PERSONAL,tag);
         }
     }
@@ -115,6 +150,7 @@ public final class DreamMine {
     private static void commands(RegisterCommandsEvent e) {
         e.getDispatcher().register(Commands.literal("dreammine")
             .then(Commands.literal("status").executes(ctx -> status(ctx.getSource())))
+            .then(Commands.literal("brain").executes(ctx -> brainStatus(ctx.getSource())))
             .then(Commands.literal("spawn").requires(src->src.hasPermission(2))
                 .executes(ctx -> manualSpawn(ctx.getSource())))
             .then(Commands.literal("auto").requires(src->src.hasPermission(2))
@@ -175,6 +211,30 @@ public final class DreamMine {
             + " | discoveries " + data.knownBlockTypes()
             + " | experiences " + data.observations()
             + " | auto " + (data.automaticSpawning()?"on":"off")),false);
+        return 1;
+    }
+    private static int brainStatus(CommandSourceStack src) {
+        if(!(src.getEntity() instanceof ServerPlayer player))return 0;
+        FakePlayerEntity dream=null; double best=64*64;
+        DreamData data=DreamData.get(src.getServer());
+        for(UUID id:data.livingIds()){
+            Entity entity=player.serverLevel().getEntity(id);
+            if(!(entity instanceof FakePlayerEntity candidate) || !owned(candidate))continue;
+            double d=player.distanceToSqr(candidate);
+            if(d<best){best=d;dream=candidate;}
+        }
+        if(dream==null){src.sendFailure(Component.literal("No Dream within 64 blocks"));return 0;}
+        FakePlayerEntity mob=dream;
+        Brain state=BRAINS.computeIfAbsent(mob.getUUID(),key -> new Brain(data,mob));
+        String result="Dream Brain | goal="+state.goal
+            +" | custom="+mob.getPersistentData().getBoolean(CONTROLLER)
+            +" | vanilla goals="+mob.goalSelector.getAvailableGoals().size()
+            +" | vanilla targets="+mob.targetSelector.getAvailableGoals().size()
+            +" | decisions="+state.decisions
+            +" | personal cells="+state.visitedCells.size()
+            +" | episodes="+state.privateEpisodes.size()
+            +" | generations="+data.generations();
+        src.sendSuccess(()->Component.literal(result),false);
         return 1;
     }
     private static int auto(CommandSourceStack src, boolean enabled) {
@@ -250,6 +310,8 @@ public final class DreamMine {
         dream.getPersistentData().putBoolean("dreammine_auto",automatic);
         if(owner!=null)dream.getPersistentData().putString(SUMMONER,owner.getUUID().toString());
         if(!level.addFreshEntity(dream))return false;
+        installController(dream);
+
         if(!data.birth(dream.getUUID(),automatic)) {dream.discard();return false;}
         dream.getPersistentData().putInt("dreammine_generation",data.generations());
         BRAINS.put(dream.getUUID(),new Brain(data,dream));
@@ -260,9 +322,21 @@ public final class DreamMine {
                 "message.dreammine.lag",data.manualLivingCount()).withStyle(ChatFormatting.RED));
         return true;
     }
+    /** Stop Fake Players' native random stroll, pursuit, combat and jobs.
+     *  Navigation and physical controls remain operational for this mod. */
+    private static void installController(FakePlayerEntity dream) {
+        dream.goalSelector.removeAllGoals(goal -> true);
+        dream.targetSelector.removeAllGoals(goal -> true);
+        dream.mutateAIState(state -> state.setRunning(false));
+        dream.setTarget(null);
+        dream.getNavigation().stop();
+        dream.getPersistentData().putBoolean(CONTROLLER,true);
+        LOGGER.info("Dream Mine: independent controller attached to "+dream.getUUID());
+    }
     private static void joined(EntityJoinLevelEvent e) {
         if (!owned(e.getEntity()) || !(e.getLevel() instanceof ServerLevel level)) return;
         DreamData data = DreamData.get(level.getServer());
+        installController((FakePlayerEntity)e.getEntity());
         if (data.owns(e.getEntity().getUUID()))
             BRAINS.putIfAbsent(e.getEntity().getUUID(),new Brain(data,(FakePlayerEntity)e.getEntity()));
     }
@@ -289,6 +363,9 @@ public final class DreamMine {
             if (!(entity instanceof FakePlayerEntity dream) || !owned(dream)
                 || !dream.isAlive()) continue;
             Brain brain = BRAINS.computeIfAbsent(id,k -> new Brain(data,dream));
+            if(!dream.getPersistentData().getBoolean(CONTROLLER))
+                installController(dream);
+
             ServerPlayer nearest = nearest(level,dream);
             if (nearest==null) {
                 if (!dream.getPersistentData().getBoolean(SLEEP)) {
@@ -296,7 +373,7 @@ public final class DreamMine {
                     dream.getPersistentData().putBoolean(SLEEP,true);
                     dream.setNoAi(true);
                 }
-                brain.returning=false; brain.last=-1;
+                brain.goal="PAUSED_NO_PLAYER"; brain.returning=false; brain.last=-1;
                 continue;
             }
             if (dream.getPersistentData().getBoolean(SLEEP)) {
@@ -306,7 +383,7 @@ public final class DreamMine {
             if (dream.isNoAi()) continue;
             DreamLeash.Decision leash = DreamLeash.decide(dream.distanceToSqr(nearest),true,brain.returning);
             if (leash==DreamLeash.Decision.RELOCATE) {
-                brain.last=-1; brain.returning=true;
+                brain.goal="RECOVER_RANGE"; brain.last=-1; brain.returning=true;
                 dream.getNavigation().stop();
                 if (relocate(level,dream,nearest)) {
                     brain.returning=false; brain.next=level.getGameTime()+20;
@@ -314,14 +391,14 @@ public final class DreamMine {
                 continue;
             }
             if (leash==DreamLeash.Decision.RETURN) {
-                brain.returning=true; brain.last=-1;
+                brain.goal="RETURN_TO_PLAYER"; brain.returning=true; brain.last=-1;
                 if (dream.getNavigation().isDone() || tick%40==0)
                     dream.getNavigation().moveTo(nearest,1.15);
                 continue;
             }
             brain.returning=false;
             if (level.getGameTime() < brain.next) continue;
-            brain.next=level.getGameTime()+80;
+            brain.next=level.getGameTime()+60;
             think(level,dream,brain,data,nearest);
         }
     }
@@ -375,46 +452,88 @@ public final class DreamMine {
     }
     private static void think(ServerLevel level, FakePlayerEntity dream,Brain brain,
                               DreamData data,ServerPlayer anchor) {
+        brain.decisions++;
+        brain.lastDecisionTick=level.getGameTime();
         if(brain.last>=0) {
             double traveled=Math.hypot(dream.getX()-brain.lastX,dream.getZ()-brain.lastZ);
-            double reward=traveled>=0.8?1:-0.5;
+            double reward=traveled>=1.4?1:-0.65;
             brain.remember(dream,brain.last,reward);
             data.learn(brain.last,reward);
-            if(brain.eligibleSample) DreamTelemetry.observe(level,anchor,data,brain.last,reward);
-            brain.eligibleSample=false;
+            if(brain.eligibleSample)DreamTelemetry.observe(level,anchor,data,brain.last,reward);
             brain.last=-1;
+            brain.eligibleSample=false;
         }
+        brain.visited(dream);
         BlockPos here=dream.blockPosition();
-        if (dream.isInWater()) {
-            for(int[] dir:DIRECTIONS) {
-                BlockPos dry=here.offset(dir[0]*2,0,dir[1]*2);
-                if(safe(level,dry)) {
-                    dream.getNavigation().moveTo(dry.getX()+0.5,dry.getY(),dry.getZ()+0.5,1.1);
-                    return;
+        if(dream.isInWater()){
+            brain.goal="ESCAPE_WATER";
+            for(int[] dir:DIRECTIONS){
+                for(int rise=0;rise<=2;rise++){
+                    BlockPos dry=here.offset(dir[0]*3,rise,dir[1]*3);
+                    if(safe(level,dry) && dream.getNavigation().moveTo(
+                        dry.getX()+0.5,dry.getY(),dry.getZ()+0.5,1.15))return;
                 }
             }
+            dream.getJumpControl().jump();
+            return;
         }
-        if(!level.hasChunkAt(here.below())) return;
-        data.discovered(BuiltInRegistries.BLOCK.getKey(level.getBlockState(here.below()).getBlock()).toString());
-        if(dream.distanceToSqr(anchor)<64 && level.getGameTime()-brain.encounterAt>1200) {
+        if(!level.hasChunkAt(here.below()))return;
+        String local=BuiltInRegistries.BLOCK.getKey(
+            level.getBlockState(here.below()).getBlock()).toString();
+        data.discovered(local);
+        if(dream.distanceToSqr(anchor)<64 && level.getGameTime()-brain.encounterAt>1200){
             data.encounter(anchor.getGameProfile().getName());
             brain.encounterAt=level.getGameTime();
         }
-        if (!dream.getNavigation().isDone())return;
-        boolean[] mask=new boolean[8];
-        BlockPos[] spots=new BlockPos[8];
-        for(int i=0;i<8;i++) {
-            BlockPos at=here.offset(DIRECTIONS[i][0]*5,0,DIRECTIONS[i][1]*5);
-            spots[i]=at;
-            mask[i]=safe(level,at) && DreamLeash.allowWander(at.distSqr(anchor.blockPosition()));
+        if(!dream.getNavigation().isDone()){
+            brain.goal="TRAVEL_TO_DISCOVERY";
+            return;
         }
-        int choice=brain.mind.choose(mask,new Random(level.random.nextLong()),data.culture());
-        if(choice<0)return;
-        BlockPos to=spots[choice];
+        // Purposeful social observation: look at nearby players rather than only walking.
+        if(dream.distanceToSqr(anchor)<36 && level.random.nextInt(5)==0){
+            brain.goal="OBSERVE_PLAYER";
+            dream.getLookControl().setLookAt(anchor,30,30);
+            return;
+        }
+        boolean[] mask=new boolean[8];
+        BlockPos[] targets=new BlockPos[8];
+        double[] curiosity=new double[8];
+        for(int i=0;i<8;i++){
+            BlockPos base=here.offset(DIRECTIONS[i][0]*6,0,DIRECTIONS[i][1]*6);
+            for(int dy:new int[]{0,1,-1,2,-2}){
+                BlockPos at=base.offset(0,dy,0);
+                if(!safe(level,at) ||
+                    !DreamLeash.allowWander(at.distSqr(anchor.blockPosition())))continue;
+                mask[i]=true;
+                targets[i]=at;
+                String block=BuiltInRegistries.BLOCK.getKey(
+                    level.getBlockState(at.below()).getBlock()).toString();
+                int seen=data.seenBlock(block);
+                curiosity[i]=(brain.hasVisited(at)?-0.75:1.0)
+                         + 0.85 / Math.sqrt(1+seen)
+                         + level.random.nextDouble()*0.05;
+                break;
+            }
+        }
+        int choice=brain.mind.choose(mask,new Random(level.random.nextLong()),
+                                       data.culture(),curiosity);
+        if(choice<0){
+            brain.goal="NO_SAFE_ROUTE";
+            return;
+        }
+        BlockPos destination=targets[choice];
         brain.last=choice;brain.lastX=dream.getX();brain.lastZ=dream.getZ();
         brain.eligibleSample=DreamTelemetry.consentForArea(level,anchor,data);
-        if(!dream.getNavigation().moveTo(to.getX()+0.5,to.getY(),to.getZ()+0.5,0.95)) {
-            brain.remember(dream,choice,-1);data.learn(choice,-1);brain.last=-1;
+        brain.goal="SEEK_UNEXPLORED_AREA";
+        dream.getLookControl().setLookAt(destination.getX()+0.5,
+                                         destination.getY()+1,
+                                         destination.getZ()+0.5);
+        if(!dream.getNavigation().moveTo(destination.getX()+0.5,
+                                          destination.getY(),destination.getZ()+0.5,1.0)){
+            brain.goal="REPLAN_BLOCKED";
+            brain.remember(dream,choice,-1);
+            data.learn(choice,-1);
+            brain.last=-1;
         }
     }
     private static boolean safe(ServerLevel level,BlockPos at) {

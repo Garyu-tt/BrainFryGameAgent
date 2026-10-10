@@ -54,6 +54,9 @@ public final class DreamData extends SavedData {
     public long observations() { return observations; }
     public int knownBlockTypes() { return visitedBlocks.size(); }
     public int knownPlayers() { return playerEncounters.size(); }
+    /** World-shared frequency map, used to rank unexplored terrain. */
+    public int seenBlock(String blockId) { return visitedBlocks.getOrDefault(blockId,0); }
+
     public Boolean diagnosticConsent(UUID id) { return diagnosticsConsent.get(id); }
     public int diagnosticOptIns() {
         int count=0;
