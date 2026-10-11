@@ -32,6 +32,13 @@ public final class DreamWork {
     private static final String KEY="dreammine_embedded_h01_v017";
     public static final class WorkState {
         public final EmbeddedH01 cortex;
+        public final DreamExecutive executive=new DreamExecutive();
+        public final LinkedHashSet<Long> surveyedCells=new LinkedHashSet<>();
+        public final LinkedHashSet<Long> inspectedLogs=new LinkedHashSet<>();
+        public long targetPositionForInspection;
+        public BlockPos explorationOrigin;
+        public String initialMaterial="UNKNOWN";
+        public int socialFrames, observedPlayerMovement, intentDecisions;
         public DreamSensory.Frame perception;
         public int sensoryFrames=0;
         public long lastSensedTick=-100000;
@@ -47,6 +54,15 @@ public final class DreamWork {
                                     ^entity.getUUID().getLeastSignificantBits());
             CompoundTag data=entity.getPersistentData().getCompound(KEY);
             cortex.load(data.getCompound("neural"));
+            executive.load(data.getCompound("executive"),entity.level().getGameTime());
+            for(long log:data.getLongArray("inspectedLogs")){
+                inspectedLogs.add(log);
+                if(inspectedLogs.size()>64)inspectedLogs.remove(inspectedLogs.iterator().next());
+            }
+            for(long cell:data.getLongArray("surveyedCells")){
+                surveyedCells.add(cell);
+                if(surveyedCells.size()>128)surveyedCells.remove(surveyedCells.iterator().next());
+            }
             if(!data.contains("neural")){
                 DreamData shared=DreamData.get(entity.getServer());
                 if(shared.neuralContributions()>0)
@@ -57,9 +73,26 @@ public final class DreamWork {
             built=Math.max(0,data.getLong("built"));
             finishedTable=data.getBoolean("finishedTable");
         }
+        private static long cellKey(BlockPos pos){
+            long x=Math.floorDiv(pos.getX(),8);
+            long z=Math.floorDiv(pos.getZ(),8);
+            return (x<<32) ^ (z&0xffffffffL);
+        }
+        boolean previouslySurveyed(BlockPos pos){return surveyedCells.contains(cellKey(pos));}
+        void recordSurvey(BlockPos pos){
+            surveyedCells.add(cellKey(pos));
+            while(surveyedCells.size()>128)surveyedCells.remove(surveyedCells.iterator().next());
+        }
         public void save(FakePlayerEntity e,long tick){
             CompoundTag data=new CompoundTag();
             data.put("neural",cortex.save());
+            data.put("executive",executive.save());
+            long[] visited=new long[surveyedCells.size()];
+            int k=0;for(long cell:surveyedCells)visited[k++]=cell;
+            data.putLongArray("surveyedCells",visited);
+            long[] knownLogs=new long[inspectedLogs.size()];
+            int logIndex=0;for(long log:inspectedLogs)knownLogs[logIndex++]=log;
+            data.putLongArray("inspectedLogs",knownLogs);
             data.putLong("gathered",gathered);
             data.putLong("crafted",crafted);
             data.putLong("built",built);
@@ -111,26 +144,51 @@ public final class DreamWork {
             w.cortex.senseFrame(w.perception.values);
         }
 
+        w.executive.expire(now);
+        if("WATCH_PLAYER".equals(w.goal) && w.executive.phase()==DreamExecutive.Phase.COMMITTED){
+            if(now-w.decisionTick>240 || !w.executive.active(now)){
+                if(w.socialFrames>=8){
+                    w.executive.complete("PLAYER_SEEN_IN_"+w.socialFrames+"_FRAMES",now);
+                    reinforcement(level,w,.40f);
+                }else w.executive.fail("INSUFFICIENT_OBSERVATION_FRAMES",now);
+                w.goal="SOCIAL_OBSERVATION_COMPLETE";
+                return false;
+            }
+            dream.getNavigation().stop();
+            dream.getLookControl().setLookAt(anchor,30,30);
+            if(now%20==0){
+                w.socialFrames++;
+                if(anchor.getDeltaMovement().horizontalDistanceSqr()>.006)w.observedPlayerMovement++;
+                w.executive.progress("ATTEND_PLAYER","PLAYER_VISIBLE_IN_RANGE",now);
+            }
+            return true;
+        }
         if(!worldActions && "HARVEST_TREE".equals(w.goal)){
             if(w.target!=null)level.destroyBlockProgress(dream.getId(),w.target,-1);
             w.target=null;w.stand=null;w.workUntil=0;
             w.goal="WORLD_ACTIONS_DISABLED";
+            w.executive.interrupt("WORLD_ACTIONS_DISABLED",now);
             return false;
         }
         if(!worldActions && "COLLECT_DROPS".equals(w.goal)){
             w.goal="WORLD_ACTIONS_DISABLED";
             w.harvestedAt=null;
+            w.executive.interrupt("WORLD_ACTIONS_DISABLED",now);
             return false;
         }
         if("EXAMINE_TREE".equals(w.goal) && w.target!=null){
             if(!level.hasChunkAt(w.target) || !level.getBlockState(w.target).is(BlockTags.OVERWORLD_NATURAL_LOGS)){
                 w.target=null;w.goal="SEARCH_NEW_RESOURCE";
+                w.executive.fail("TARGET_LOG_DISAPPEARED",now);
                 return false;
             }
             if(dream.distanceToSqr(w.target.getX()+.5,w.target.getY()+.5,w.target.getZ()+.5)>12.25){
                 if(w.stand!=null && (dream.getNavigation().isDone() || now%40==0))
                     dream.getNavigation().moveTo(w.stand.getX()+.5,w.stand.getY(),w.stand.getZ()+.5,1.0);
-                if(now-w.decisionTick>400){w.target=null;w.goal="EXAMINE_PATH_FAILED";}
+                if(now-w.decisionTick>400){
+                    w.target=null;w.goal="EXAMINE_PATH_FAILED";
+                    w.executive.fail("NO_PATH_TO_INSPECTION",now);
+                }
                 return true;
             }
             dream.getNavigation().stop();
@@ -140,6 +198,12 @@ public final class DreamWork {
                 w.plan="RECOGNIZED_LOG_NO_WORLD_CHANGES";
                 w.target=null;
                 w.nextScan=now+320;
+                // Inspect each actual observed tree only once until LRU eviction.
+                // Don't keep returning to the exact same trunk.
+                w.inspectedLogs.add(w.targetPositionForInspection);
+                while(w.inspectedLogs.size()>64)w.inspectedLogs.remove(w.inspectedLogs.iterator().next());
+                if(w.executive.phase()==DreamExecutive.Phase.COMMITTED)
+                    w.executive.complete("OBSERVED_NATURAL_LOG_IN_WORLD",now);
                 reinforcement(level,w,.5f);
             }
             return true;
@@ -151,6 +215,7 @@ public final class DreamWork {
                || !level.getBlockState(w.target).is(BlockTags.OVERWORLD_NATURAL_LOGS)){
                 level.destroyBlockProgress(dream.getId(),w.target,-1);
                 w.target=null;w.goal="SEARCHING";reinforcement(level,w,-.4f);
+                w.executive.fail("TARGET_NOT_AVAILABLE",now);
                 return false;
             }
             if(dream.distanceToSqr(w.target.getX()+.5,w.target.getY()+.5,w.target.getZ()+.5)>12.25){
@@ -158,6 +223,7 @@ public final class DreamWork {
                     dream.getNavigation().moveTo(w.stand.getX()+.5,w.stand.getY(),w.stand.getZ()+.5,1);
                 if(now>w.startTick+450){
                     w.target=null;w.goal="REPLAN_UNREACHABLE";reinforcement(level,w,-.6f);
+                    w.executive.fail("REACH_TARGET_STALLED",now);
                 }
                 return true;
             }
@@ -178,37 +244,97 @@ public final class DreamWork {
             w.target=null;
             if(level.destroyBlock(harvested,true,dream)){
                 w.goal="COLLECT_DROPS";w.plan="PICKUP_LOG";w.harvestedAt=harvested;
-                w.gathered++;reinforcement(level,w,.85f);
+                w.gathered++;
+                w.executive.progress("PICKUP_PENDING","BLOCK_REMOVED_VERIFIED",now);
+                reinforcement(level,w,.25f);
                 w.decisionTick=now;
-            } else {w.goal="REPLAN_FAILED";reinforcement(level,w,-.8f);}
+            } else {
+                w.goal="REPLAN_FAILED";reinforcement(level,w,-.8f);
+                w.executive.fail("SERVER_DENIED_BLOCK_BREAK",now);
+            }
             return true;
         }
         if("COLLECT_DROPS".equals(w.goal)){
             int count=pickupWood(level,dream,w.harvestedAt);
             if(count>0){
                 w.goal="CRAFT_PENDING";w.harvestedAt=null;
+                if(w.executive.phase()==DreamExecutive.Phase.COMMITTED)
+                    w.executive.complete("ITEM_TRANSFERRED_TO_REAL_INVENTORY",now);
                 reinforcement(level,w,.8f);
                 return false;
             }
             if(now-w.decisionTick<90)return true; // drops require a few ticks to settle
             w.goal="SEARCHING";w.harvestedAt=null;
+            w.executive.fail("DROPS_NOT_COLLECTED_WITHIN_TIMEOUT",now);
             return false;
         }
         return false;
+    }
+    public static void pause(ServerLevel level,FakePlayerEntity dream,String reason){
+        WorkState w=forEntity(dream);
+        if(w.target!=null)level.destroyBlockProgress(dream.getId(),w.target,-1);
+        w.executive.interrupt(reason,level.getGameTime());
+        w.target=null;w.stand=null;w.harvestedAt=null;
+        w.goal="SAFETY_INTERRUPT";w.plan=reason;
+        w.save(dream,level.getGameTime());
     }
     /** Returns true when the agent has committed to a non-wandering plan. */
     public static boolean think(ServerLevel level,FakePlayerEntity dream,
                                 ServerPlayer anchor,boolean worldActions){
         WorkState w=forEntity(dream);
         long now=level.getGameTime();
-        if(w.target!=null && "HARVEST_TREE".equals(w.goal))return true;
+        if(w.executive.active(now)){
+            int action=w.executive.action();
+            if(action==0) { // environment inquiry requires observed progress
+                if(!dream.getNavigation().isDone()){
+                    w.goal="SCOUTING";w.plan="VISIT_NEW_TERRAIN -> COMPARE_OBSERVATIONS";
+                    return true;
+                }
+                double distance=w.explorationOrigin==null?0:
+                    Math.sqrt(dream.blockPosition().distSqr(w.explorationOrigin));
+                if(distance>=4 && level.hasChunkAt(dream.blockPosition().below())){
+                    BlockPos nowAt=dream.blockPosition();
+                    String material=net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                        .getKey(level.getBlockState(nowAt.below()).getBlock()).toString();
+                    boolean newCell=!w.previouslySurveyed(nowAt);
+                    boolean changedMaterial=!material.equals(w.initialMaterial);
+                    boolean hasScene=w.perception!=null
+                        && w.perception.observedTick>=w.executive.lastChosenTick()
+                        && w.perception.knownRays>=12;
+                    if(hasScene && (newCell||changedMaterial)){
+                        w.recordSurvey(nowAt);
+                        DreamData.get(level.getServer()).discovered(material);
+                        w.executive.complete("NEW_SCENE_VERIFIED_"+
+                            (newCell?"CELL":"MATERIAL")+"_RAYS_"+w.perception.knownRays,now);
+                        reinforcement(level,w,.5f);
+                        w.goal="SCOUT_COMPLETED";
+                        return true;
+                    }
+                }
+                if(w.executive.age(now)>=180) {
+                    w.executive.fail("SCOUT_DID_NOT_REACH_NEW_AREA",now);
+                    reinforcement(level,w,-.35f);
+                }else return true;
+            }else if(action==4 && "WATCH_PLAYER".equals(w.goal))return true;
+            else if(action==1 && w.target!=null)return true;
+        }
+        if(w.executive.phase()==DreamExecutive.Phase.DEFERRED){
+            w.target=null;w.stand=null;
+        }
+        if(!w.executive.ready(now)) {
+            w.goal=w.executive.phase()==DreamExecutive.Phase.DEFERRED?"RECONSIDERING_PLAN":"WAIT_FOR_RESULT";
+            w.plan=w.executive.evidence();
+            return true;
+        }
+
         FakePlayerInventory inventory=dream.getInventory();
         int logs=count(inventory,true),planks=count(inventory,false);
         BlockPos tree=null,stand=null;
         if(logs==0 && planks<4 && now>=w.nextScan){
-            var found=findTree(level,dream,anchor);
+            var found=findTree(level,dream,anchor,w);
             if(found!=null){tree=found[0];stand=found[1];}
-            w.nextScan=now+100;
+            int population=DreamData.get(level.getServer()).livingCount();
+            w.nextScan=now+(population<=4?200:population<=16?400:800);
         }
         float[] sensors=new float[EmbeddedH01.INPUTS];
         sensors[0]=tree!=null?1:0;
@@ -223,9 +349,14 @@ public final class DreamWork {
         sensors[9]=(float)Math.min(1,w.crafted/8.);
         sensors[10]=(float)Math.min(1,w.gathered/4.);
         sensors[11]=level.isDay()?1:0;
-        boolean[] options={true,tree!=null,worldActions&&logs>0,
-                           worldActions&&planks>=4&&!w.finishedTable,
-                           dream.distanceToSqr(anchor)<49};
+        boolean[] options={
+            w.executive.canChooseAction(0,now),
+            tree!=null && w.executive.canChooseAction(1,now),
+            worldActions && logs>0 && w.executive.canChooseAction(2,now),
+            worldActions && planks>=4 && !w.finishedTable
+                         && w.executive.canChooseAction(3,now),
+            dream.distanceToSqr(anchor)<49 && w.executive.canChooseAction(4,now)
+        };
         // BrainFly-compatible retina/body/proprio channels drive the recurrent neural
         // runtime, rather than only the 12-element handcrafted resource vector.
         // Inherit the latest continuous sensory frame. Resource affordances are
@@ -239,11 +370,16 @@ public final class DreamWork {
         System.arraycopy(sensors,0,w.perception.values,0,12);
         int choice=w.cortex.choose(w.perception.values,options);
         w.decision=choice;
+        if(choice<0)return true;
+        w.intentDecisions++;
+        long commitment=choice==1?640:choice==4?260:choice==0?260:160;
+        w.executive.commit(choice,EmbeddedH01.ACTION_NAMES[choice],now,commitment);
         if(choice==1 && tree!=null){
             if(!worldActions){
                 w.goal="EXAMINE_TREE";
                 w.plan="LOCATE -> APPROACH -> OBSERVE -> LEARN";
                 w.target=tree;w.stand=stand;w.decisionTick=now;
+                w.targetPositionForInspection=tree.asLong();
                 dream.getNavigation().moveTo(stand.getX()+.5,stand.getY(),stand.getZ()+.5,1.05);
                 return true;
             }
@@ -256,27 +392,44 @@ public final class DreamWork {
         if(choice==2){
             w.goal="CRAFT_PLANKS";w.plan="1 LOG -> 4 PLANKS";
             if(craftPlanks(inventory)){
-                w.crafted++;reinforcement(level,w,1f);
-            }else{reinforcement(level,w,-.6f);}
+                w.crafted++;
+                w.executive.complete("LOG_CONSUMED_AND_PLANKS_IN_INVENTORY",now);
+                reinforcement(level,w,1f);
+            }else{
+                w.executive.fail("CRAFT_NOT_POSSIBLE_OR_INVENTORY_FULL",now);
+                reinforcement(level,w,-.6f);
+            }
             w.nextScan=now+80;
             return true;
         }
         if(choice==3){
             w.goal="BUILD_WORKBENCH";w.plan="4 PLANKS -> CRAFTING_TABLE";
             if(placeTable(level,dream,anchor,inventory)){
-                w.finishedTable=true;w.built++;reinforcement(level,w,1f);
+                w.finishedTable=true;w.built++;
+                w.executive.complete("CRAFTING_TABLE_BLOCK_EXISTS_IN_WORLD",now);
+                reinforcement(level,w,1f);
                 w.goal="WORKBENCH_BUILT";w.plan="FIND_NEXT_TASK";
-            }else{reinforcement(level,w,-.5f);}
+            }else{
+                w.executive.fail("TABLE_LOCATION_OR_MATERIAL_INVALID",now);
+                reinforcement(level,w,-.5f);
+            }
             return true;
         }
         if(choice==4){
             w.goal="WATCH_PLAYER";w.plan="SOCIAL_OBSERVATION";
+            w.socialFrames=0;w.observedPlayerMovement=0;
+            w.decisionTick=now;
+            dream.getNavigation().stop();
             dream.getLookControl().setLookAt(anchor,30,30);
-            reinforcement(level,w,.05f);
             return true;
         }
-        w.goal=worldActions?"SCOUT_FOR_RESOURCES":"OBSERVE_WORLD";
-        w.plan=worldActions?"DISCOVER -> IDENTIFY -> GATHER":"NONDESTRUCTIVE_EXPLORATION";
+        w.goal="SCOUT_NEW_AREA";
+        w.plan="NAVIGATE -> OBSERVE -> VERIFY_VISIT -> LEARN";
+        w.explorationOrigin=dream.blockPosition();
+        w.recordSurvey(dream.blockPosition());
+        if(level.hasChunkAt(dream.blockPosition().below()))
+            w.initialMaterial=net.minecraft.core.registries.BuiltInRegistries.BLOCK
+                .getKey(level.getBlockState(dream.blockPosition().below()).getBlock()).toString();
         return false;
     }
     public static String senses(FakePlayerEntity entity){
@@ -308,6 +461,9 @@ public final class DreamWork {
             +" goal="+w.goal+" plan="+w.plan
             +" logs="+logs+" planks="+planks
             +" mined="+w.gathered+" crafted="+w.crafted+" built="+w.built
+            +" "+w.executive.debug(entity.level().getGameTime())
+            +" social_frames="+w.socialFrames+" moves_seen="+w.observedPlayerMovement
+            +" mapped_cells="+w.surveyedCells.size()+" inspected_logs="+w.inspectedLogs.size()
             +" sharedNeural="+DreamData.get(entity.getServer()).neuralContributions()
             +" sensed="+(w.perception==null?"none":
                  w.sensoryFrames+"frames/"+DreamSensory.channels()+"channels/"
@@ -400,16 +556,22 @@ public final class DreamWork {
         }
         return true;
     }
-    private static BlockPos[] findTree(ServerLevel level,FakePlayerEntity mob,ServerPlayer player) {
+    private static BlockPos[] findTree(ServerLevel level,FakePlayerEntity mob,
+                                       ServerPlayer player,WorkState state) {
         BlockPos at=mob.blockPosition();
         BlockPos best=null,stand=null;
         double bestDist=Double.POSITIVE_INFINITY;
-        // Bound scanning to ~750 loaded positions, no forced chunk loads.
-        for(int dx=-6;dx<=6;dx++)for(int dz=-6;dz<=6;dz++){
-            if(Math.abs(dx)+Math.abs(dz)>9)continue;
-            for(int dy=-2;dy<=5;dy++){
+        // Strict work cap: 360 positions and 12 costly natural-tree tests per scan.
+        int blockReads=0,logProbes=0;
+        for(int dx=-4;dx<=4;dx++)for(int dz=-4;dz<=4;dz++){
+            if(Math.abs(dx)+Math.abs(dz)>6)continue;
+            for(int dy=-1;dy<=2;dy++){
+                if(++blockReads>360 || logProbes>12)return best==null?null:new BlockPos[]{best,stand};
                 BlockPos log=at.offset(dx,dy,dz);
-                if(!level.hasChunkAt(log)||!isNaturalLog(level,log))continue;
+                if(!level.hasChunkAt(log) || state.inspectedLogs.contains(log.asLong())
+                    || !level.getBlockState(log).is(BlockTags.OVERWORLD_NATURAL_LOGS))continue;
+                logProbes++;
+                if(!isNaturalLog(level,log))continue;
                 if(!DreamLeash.withinLimit(log.distSqr(player.blockPosition())))continue;
                 for(Direction side:Direction.Plane.HORIZONTAL){
                     BlockPos p=log.relative(side);

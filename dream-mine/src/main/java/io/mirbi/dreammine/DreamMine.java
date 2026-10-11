@@ -258,7 +258,8 @@ public final class DreamMine {
             +" | custom="+mob.getPersistentData().getBoolean(CONTROLLER)
             +" | vanilla goals="+mob.goalSelector.getAvailableGoals().size()
             +" | vanilla targets="+mob.targetSelector.getAvailableGoals().size()
-            +" | decisions="+state.decisions
+            +" | controller_ticks="+state.decisions
+            +" | neural_decisions="+DreamWork.forEntity(mob).intentDecisions
             +" | personal cells="+state.visitedCells.size()
             +" | episodes="+state.privateEpisodes.size()
             +" | generations="+data.generations();
@@ -371,6 +372,7 @@ public final class DreamMine {
     private static void left(EntityLeaveLevelEvent e){
         if(!(e.getEntity() instanceof FakePlayerEntity dream)||!owned(dream))return;
         DreamWork.release(dream);
+        DreamReflex.release(dream);
         BRAINS.remove(dream.getUUID());
     }
     private static void died(LivingDeathEvent e) {
@@ -382,6 +384,7 @@ public final class DreamMine {
                 DreamPopulation.REPLACEMENT_DELAY_TICKS);
         }
         DreamWork.release((FakePlayerEntity)e.getEntity());
+        DreamReflex.release((FakePlayerEntity)e.getEntity());
         BRAINS.remove(e.getEntity().getUUID());
     }
     private static void tick(ServerTickEvent.Post event) {
@@ -407,6 +410,8 @@ public final class DreamMine {
                     dream.getPersistentData().putBoolean(SLEEP,true);
                     dream.setNoAi(true);
                 }
+                if(DreamWork.forEntity(dream).executive.active(level.getGameTime()))
+                    DreamWork.pause(level,dream,"NO_ACTIVE_PLAYER");
                 brain.goal="PAUSED_NO_PLAYER"; brain.returning=false; brain.last=-1;
                 continue;
             }
@@ -417,6 +422,8 @@ public final class DreamMine {
             if (dream.isNoAi()) continue;
             DreamLeash.Decision leash = DreamLeash.decide(dream.distanceToSqr(nearest),true,brain.returning);
             if (leash==DreamLeash.Decision.RELOCATE) {
+                if(DreamWork.forEntity(dream).executive.active(level.getGameTime()))
+                    DreamWork.pause(level,dream,"PLAYER_OUTSIDE_100_BLOCK_BOUNDARY");
                 brain.goal="RECOVER_RANGE"; brain.last=-1; brain.returning=true;
                 dream.getNavigation().stop();
                 if (relocate(level,dream,nearest)) {
@@ -425,12 +432,18 @@ public final class DreamMine {
                 continue;
             }
             if (leash==DreamLeash.Decision.RETURN) {
+                if(DreamWork.forEntity(dream).executive.active(level.getGameTime()))
+                    DreamWork.pause(level,dream,"SAFETY_TETHER_RETURN");
                 brain.goal="RETURN_TO_PLAYER"; brain.returning=true; brain.last=-1;
                 if (dream.getNavigation().isDone() || tick%40==0)
                     dream.getNavigation().moveTo(nearest,1.15);
                 continue;
             }
             brain.returning=false;
+            if(DreamReflex.handle(level,dream,nearest,tick)){
+                brain.goal="INFRASTRUCTURE_SAFETY_REFLEX";
+                continue;
+            }
             if(DreamWork.tick(level,dream,nearest,data.worldActionsEnabled())){
                 brain.goal=DreamWork.forEntity(dream).goal;
                 continue;
