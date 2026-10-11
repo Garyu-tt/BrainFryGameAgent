@@ -95,7 +95,7 @@ public final class DreamTelemetry {
         int[] perDirection=Arrays.copyOf(attempts,8);
         int[] positive=Arrays.copyOf(successes,8);
         StringBuilder json=new StringBuilder();
-        json.append("{\"schema\":\"dreammine.diagnostics.v1\",\"mod\":\"0.1.6\",")
+        json.append("{\"schema\":\"dreammine.diagnostics.v1\",\"mod\":\"0.2.0\",")
             .append("\"samples\":").append(count)
             .append(",\"attempts\":").append(Arrays.toString(perDirection))
             .append(",\"successes\":").append(Arrays.toString(positive))

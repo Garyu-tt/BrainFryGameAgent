@@ -38,6 +38,7 @@ import net.neoforged.fml.common.Mod;
 import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
@@ -140,6 +141,7 @@ public final class DreamMine {
         });
         NeoForge.EVENT_BUS.addListener(DreamMine::commands);
         NeoForge.EVENT_BUS.addListener(DreamMine::joined);
+        NeoForge.EVENT_BUS.addListener(DreamMine::left);
         NeoForge.EVENT_BUS.addListener(DreamMine::died);
         NeoForge.EVENT_BUS.addListener(DreamMine::tick);
         NeoForge.EVENT_BUS.addListener(DreamMine::loggedIn);
@@ -151,6 +153,9 @@ public final class DreamMine {
         e.getDispatcher().register(Commands.literal("dreammine")
             .then(Commands.literal("status").executes(ctx -> status(ctx.getSource())))
             .then(Commands.literal("brain").executes(ctx -> brainStatus(ctx.getSource())))
+            .then(Commands.literal("actions").requires(src->src.hasPermission(2))
+                .then(Commands.literal("on").executes(ctx -> worldActions(ctx.getSource(),true)))
+                .then(Commands.literal("off").executes(ctx -> worldActions(ctx.getSource(),false))))
             .then(Commands.literal("spawn").requires(src->src.hasPermission(2))
                 .executes(ctx -> manualSpawn(ctx.getSource())))
             .then(Commands.literal("auto").requires(src->src.hasPermission(2))
@@ -213,6 +218,12 @@ public final class DreamMine {
             + " | auto " + (data.automaticSpawning()?"on":"off")),false);
         return 1;
     }
+    private static int worldActions(CommandSourceStack src,boolean enabled) {
+        DreamData.get(src.getServer()).setWorldActions(enabled);
+        src.sendSuccess(()->Component.literal(
+            "Dream Minecraft block interactions: "+(enabled?"ON (trees may be harvested, crafting tables placed)":"OFF")),true);
+        return 1;
+    }
     private static int brainStatus(CommandSourceStack src) {
         if(!(src.getEntity() instanceof ServerPlayer player))return 0;
         FakePlayerEntity dream=null; double best=64*64;
@@ -226,7 +237,8 @@ public final class DreamMine {
         if(dream==null){src.sendFailure(Component.literal("No Dream within 64 blocks"));return 0;}
         FakePlayerEntity mob=dream;
         Brain state=BRAINS.computeIfAbsent(mob.getUUID(),key -> new Brain(data,mob));
-        String result="Dream Brain | goal="+state.goal
+        String result="Dream Brain | "+DreamWork.debug(mob)
+            +" | world actions="+data.worldActionsEnabled()+" | movement="+state.goal
             +" | custom="+mob.getPersistentData().getBoolean(CONTROLLER)
             +" | vanilla goals="+mob.goalSelector.getAvailableGoals().size()
             +" | vanilla targets="+mob.targetSelector.getAvailableGoals().size()
@@ -340,6 +352,11 @@ public final class DreamMine {
         if (data.owns(e.getEntity().getUUID()))
             BRAINS.putIfAbsent(e.getEntity().getUUID(),new Brain(data,(FakePlayerEntity)e.getEntity()));
     }
+    private static void left(EntityLeaveLevelEvent e){
+        if(!(e.getEntity() instanceof FakePlayerEntity dream)||!owned(dream))return;
+        DreamWork.release(dream);
+        BRAINS.remove(dream.getUUID());
+    }
     private static void died(LivingDeathEvent e) {
         if (e.isCanceled() || !(e.getEntity().level() instanceof ServerLevel level)
             || !owned(e.getEntity())) return;
@@ -348,6 +365,7 @@ public final class DreamMine {
             data.deferSpawn(level.getServer().overworld().getGameTime(),
                 DreamPopulation.REPLACEMENT_DELAY_TICKS);
         }
+        DreamWork.release((FakePlayerEntity)e.getEntity());
         BRAINS.remove(e.getEntity().getUUID());
     }
     private static void tick(ServerTickEvent.Post event) {
@@ -397,6 +415,10 @@ public final class DreamMine {
                 continue;
             }
             brain.returning=false;
+            if(DreamWork.tick(level,dream,nearest,data.worldActionsEnabled())){
+                brain.goal=DreamWork.forEntity(dream).goal;
+                continue;
+            }
             if (level.getGameTime() < brain.next) continue;
             brain.next=level.getGameTime()+60;
             think(level,dream,brain,data,nearest);
@@ -464,6 +486,10 @@ public final class DreamMine {
             brain.eligibleSample=false;
         }
         brain.visited(dream);
+        if(DreamWork.think(level,dream,anchor,data.worldActionsEnabled())) {
+            brain.goal=DreamWork.forEntity(dream).goal;
+            return;
+        }
         BlockPos here=dream.blockPosition();
         if(dream.isInWater()){
             brain.goal="ESCAPE_WATER";

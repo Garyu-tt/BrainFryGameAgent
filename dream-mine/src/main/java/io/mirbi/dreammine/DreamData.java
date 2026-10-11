@@ -18,9 +18,13 @@ public final class DreamData extends SavedData {
     private final Set<String> optedOutPlayers = new LinkedHashSet<>();
     private final Map<UUID,Boolean> diagnosticsConsent = new LinkedHashMap<>();
     private final double[] sharedPolicy = new double[LearningMind.ACTIONS.length];
+    private final float[] sharedCortexReadout = new float[EmbeddedH01.INPUTS*EmbeddedH01.ACTIONS];
+    private int corticalContributions=0;
     private final int[] attempts = new int[LearningMind.ACTIONS.length];
     private UUID autoId; // exactly one automatic Dream per world
     private boolean automaticSpawning = true;
+    // Terrain changes are OFF until an administrator opts in for this world.
+    private boolean worldActionsEnabled = false;
     private long nextSpawnTick = 0L;
     private int generations = 0;
     private long observations = 0;
@@ -35,6 +39,13 @@ public final class DreamData extends SavedData {
     public int manualLivingCount() { return Math.max(0,living.size()-autoLivingCount()); }
     public boolean isAutomatic(UUID id) { return id != null && id.equals(autoId); }
     public boolean automaticSpawning() { return automaticSpawning; }
+    public boolean worldActionsEnabled() { return worldActionsEnabled; }
+    public void setWorldActions(boolean enabled) {
+        if(worldActionsEnabled==enabled)return;
+        worldActionsEnabled=enabled;
+        setDirty();
+    }
+
     public long nextSpawnTick() { return nextSpawnTick; }
     public void setAutomaticSpawning(boolean enable) {
         if (automaticSpawning == enable) return;
@@ -73,6 +84,21 @@ public final class DreamData extends SavedData {
     public boolean owns(UUID uuid) { return living.contains(uuid); }
     public Set<UUID> livingIds() { return Set.copyOf(living); }
     public double[] culture() { return Arrays.copyOf(sharedPolicy, sharedPolicy.length); }
+    public float[] neuralCulture(){ return Arrays.copyOf(sharedCortexReadout,sharedCortexReadout.length); }
+    public int neuralContributions(){ return corticalContributions; }
+    public void learnCortex(float[] newReadout){
+        if(newReadout==null || newReadout.length!=sharedCortexReadout.length)return;
+        float alpha=1f/Math.min(40,Math.max(1,corticalContributions+1));
+        for(int i=0;i<sharedCortexReadout.length;i++){
+            float value=newReadout[i];
+            if(!Float.isFinite(value))return;
+            sharedCortexReadout[i]=Math.max(-2,Math.min(2,
+                (1-alpha)*sharedCortexReadout[i]+alpha*value));
+        }
+        corticalContributions=Math.min(1_000_000,corticalContributions+1);
+        setDirty();
+    }
+
 
     public boolean birth(UUID id, boolean automatic) {
         if(id==null || living.contains(id) || (automatic && autoId!=null))return false;
@@ -140,6 +166,7 @@ public final class DreamData extends SavedData {
         // Backward compatibility: old worlds with a single Dream used auto-spawning.
         // Old saves did not have these flags: default to continuous generations.
         result.automaticSpawning = !tag.contains("autoSpawn") || tag.getBoolean("autoSpawn");
+        result.worldActionsEnabled = tag.getBoolean("worldActionsEnabled");
         result.nextSpawnTick = Math.max(0L, tag.getLong("nextSpawnTick"));
         result.generations = Math.max(0, tag.getInt("generations"));
         result.observations = Math.max(0, tag.getLong("observations"));
@@ -154,6 +181,11 @@ public final class DreamData extends SavedData {
             // Version 0.1.2 did not record spawn origin; preserve one existing automatic entity.
             result.autoId=result.living.iterator().next();
         }
+        int[] learnt=tag.getIntArray("neuralCulture");
+        if(learnt.length==result.sharedCortexReadout.length)
+            for(int i=0;i<learnt.length;i++)
+                result.sharedCortexReadout[i]=Math.max(-2f,Math.min(2f,learnt[i]/32767f));
+        result.corticalContributions=Math.max(0,tag.getInt("corticalContributions"));
         CompoundTag blocks = tag.getCompound("blocks");
         for (String key : blocks.getAllKeys()) if (result.visitedBlocks.size() < 256)
             result.visitedBlocks.put(key, Math.max(0, blocks.getInt(key)));
@@ -183,6 +215,12 @@ public final class DreamData extends SavedData {
         tag.putBoolean("manualSpawnMigrationV2",true);
         if(autoId!=null)tag.putUUID("autoId",autoId);
         tag.putBoolean("autoSpawn", automaticSpawning);
+        tag.putBoolean("worldActionsEnabled",worldActionsEnabled);
+        int[] cortical=new int[sharedCortexReadout.length];
+        for(int i=0;i<cortical.length;i++)cortical[i]=Math.round(sharedCortexReadout[i]*32767f);
+        tag.putIntArray("neuralCulture",cortical);
+        tag.putInt("corticalContributions",corticalContributions);
+
         tag.putLong("nextSpawnTick", nextSpawnTick);
         tag.putInt("generations", generations);
         tag.putLong("observations", observations);
