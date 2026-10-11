@@ -32,6 +32,10 @@ public final class DreamWork {
     private static final String KEY="dreammine_embedded_h01_v017";
     public static final class WorkState {
         public final EmbeddedH01 cortex;
+        public DreamSensory.Frame perception;
+        public int sensoryFrames=0;
+        public long lastSensedTick=-100000;
+
         public String goal="INITIALIZING",plan="OBSERVE";
         public BlockPos target,stand,harvestedAt;
         public long startTick,workUntil,nextScan,decisionTick,lastSave;
@@ -81,6 +85,32 @@ public final class DreamWork {
         WorkState w=forEntity(dream);
         long now=level.getGameTime();
         if(now-w.lastSave>=1200){w.save(dream,now);}
+        // Perception continues while the entity is walking; decision events alone
+        // are not enough to create a sensorimotor learning loop.
+        int population=DreamData.get(level.getServer()).livingCount();
+        int sensoryInterval=population<=4?40:population<=16?80:population<=64?160:240;
+        if(now-w.lastSensedTick>=sensoryInterval){
+            float[] legacy=new float[EmbeddedH01.INPUTS];
+            int logs=count(dream.getInventory(),true),planks=count(dream.getInventory(),false);
+            legacy[0]=0; // no asserted target until the resource scan provides evidence
+            legacy[1]=logs>0?1:0;
+            legacy[2]=planks>=4?1:0;
+            legacy[3]=dream.distanceToSqr(anchor)<100?1:0;
+            legacy[4]=Math.min(1,dream.getHealth()/Math.max(1,dream.getMaxHealth()));
+            legacy[5]=dream.isInWater()?1:0;
+            legacy[6]=(float)Math.min(1,dream.distanceToSqr(anchor)/10000);
+            legacy[7]=worldActions?1:0;
+            legacy[8]=w.finishedTable?1:0;
+            legacy[9]=(float)Math.min(1,w.crafted/8.);
+            legacy[10]=(float)Math.min(1,w.gathered/4.);
+            legacy[11]=level.isDay()?1:0;
+            w.perception=DreamSensory.observe(level,dream,anchor,legacy,w.perception,
+                                                   !dream.getNavigation().isDone());
+            w.sensoryFrames++;
+            w.lastSensedTick=now;
+            w.cortex.senseFrame(w.perception.values);
+        }
+
         if(!worldActions && "HARVEST_TREE".equals(w.goal)){
             if(w.target!=null)level.destroyBlockProgress(dream.getId(),w.target,-1);
             w.target=null;w.stand=null;w.workUntil=0;
@@ -196,7 +226,18 @@ public final class DreamWork {
         boolean[] options={true,tree!=null,worldActions&&logs>0,
                            worldActions&&planks>=4&&!w.finishedTable,
                            dream.distanceToSqr(anchor)<49};
-        int choice=w.cortex.choose(sensors,options);
+        // BrainFly-compatible retina/body/proprio channels drive the recurrent neural
+        // runtime, rather than only the 12-element handcrafted resource vector.
+        // Inherit the latest continuous sensory frame. Resource affordances are
+        // updated here from the inventory and verified tree scan, not fabricated.
+        if(w.perception==null || now-w.lastSensedTick>120){
+            w.perception=DreamSensory.observe(level,dream,anchor,sensors,w.perception,
+                                               !dream.getNavigation().isDone());
+            w.sensoryFrames++;
+            w.lastSensedTick=now;
+        }
+        System.arraycopy(sensors,0,w.perception.values,0,12);
+        int choice=w.cortex.choose(w.perception.values,options);
         w.decision=choice;
         if(choice==1 && tree!=null){
             if(!worldActions){
@@ -238,11 +279,28 @@ public final class DreamWork {
         w.plan=worldActions?"DISCOVER -> IDENTIFY -> GATHER":"NONDESTRUCTIVE_EXPLORATION";
         return false;
     }
+    public static String senses(FakePlayerEntity entity){
+        WorkState w=forEntity(entity);
+        DreamSensory.Frame f=w.perception;
+        if(f==null)return "No sensory frame yet (wait for a decision)";
+        return "Dream Sensors | "+DreamSensory.channels()+" named channels"
+            +" | observed="+f.retinaRays+" rays"
+            +" | known="+f.knownRays+" unknown="+f.unloadedRays
+            +" | voxels="+f.voxelReads
+            +" | reliability="+String.format(Locale.ROOT,"%.2f",f.reliability)
+            +" | floor_unknown="+f.value("visual_underfoot_unknown")
+            +" | front_obstacle="+f.value("obstacle_forward")
+            +" | cliff="+f.value("cliff_forward")
+            +" | head_submerged="+f.value("head_submerged")
+            +" | motion_error="+String.format(Locale.ROOT,"%.2f",f.value("proprio_motion_error"))
+            +" | resources_seen="+f.salientResources
+            +" | danger_seen="+f.salientThreats;
+    }
     public static String debug(FakePlayerEntity entity){
         WorkState w=forEntity(entity);
         int logs=count(entity.getInventory(),true);
         int planks=count(entity.getInventory(),false);
-        return "embedded=H01-lite "+w.cortex.modules()+"x"+EmbeddedH01.COLUMNS
+        return "embedded=H01-sensory "+w.cortex.modules()+"x"+EmbeddedH01.COLUMNS
             +" synapses="+w.cortex.synapseCount()
             +" steps="+w.cortex.steps()+" updates="+w.cortex.reinforcementCount()
             +" changed="+w.cortex.changedWeights()
@@ -250,7 +308,12 @@ public final class DreamWork {
             +" goal="+w.goal+" plan="+w.plan
             +" logs="+logs+" planks="+planks
             +" mined="+w.gathered+" crafted="+w.crafted+" built="+w.built
-            +" sharedNeural="+DreamData.get(entity.getServer()).neuralContributions();
+            +" sharedNeural="+DreamData.get(entity.getServer()).neuralContributions()
+            +" sensed="+(w.perception==null?"none":
+                 w.sensoryFrames+"frames/"+DreamSensory.channels()+"channels/"
+                 +w.perception.retinaRays+"rays/"+w.perception.voxelReads+"voxels")
+            +" vision_reliability="+(w.perception==null?"n/a":
+                 String.format(Locale.ROOT,"%.2f",w.perception.reliability));
     }
     private static void reinforcement(ServerLevel level, WorkState w, float result){
         w.cortex.reward(result);

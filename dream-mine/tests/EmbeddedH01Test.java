@@ -33,9 +33,9 @@ public class EmbeddedH01Test {
         boolean[] onlySocial={false,false,false,false,true};
         ok(cortex.choose(sensors,onlySocial)==4,"action mask");
         ok(cortex.choose(sensors,new boolean[]{false,false,false,false,false})==-1,"all blocked");
-        float[] sanitized=EmbeddedH01.sanitize(new float[]{
-            Float.NaN,Float.POSITIVE_INFINITY,4,-9,.25f,0,0,0,0,0,0,0
-        });
+        float[] bad=new float[EmbeddedH01.INPUTS];
+        bad[0]=Float.NaN;bad[1]=Float.POSITIVE_INFINITY;bad[2]=4;bad[3]=-9;bad[4]=.25f;
+        float[] sanitized=EmbeddedH01.sanitize(bad);
         ok(sanitized[0]==0 && sanitized[1]==0 && sanitized[2]==1 && sanitized[3]==-1,"sanitized");
         EmbeddedH01 child=new EmbeddedH01(456);
         child.inheritReadout(readout,1);
@@ -54,6 +54,17 @@ public class EmbeddedH01Test {
             newborn.inheritReadout(child.learnedReadout(),.75f);
             ok(newborn.synapseCount()==cortex.synapseCount(),"newborn topology");
         }
+        // Migration from 0.2.0 12-channel NBT saves must preserve old training.
+        CompoundTag legacy=new CompoundTag();
+        int[] former=new int[EmbeddedH01.ACTIONS*12];
+        former[0]=16384;
+        former[12+11]=-8192;
+        legacy.putIntArray("readout",former);
+        EmbeddedH01 migrated=new EmbeddedH01(999);
+        migrated.load(legacy);
+        approx(migrated.learnedReadout()[0],.5f,"legacy first readout preserved");
+        approx(migrated.learnedReadout()[EmbeddedH01.INPUTS+11],-.25f,"legacy second action mapped");
+        ok(EmbeddedH01.INPUTS==768,"expanded 768-dimensional neural inputs");
         System.out.println("PASS "+checks+" neural plasticity + persistence + inheritance checks");
     }
 }

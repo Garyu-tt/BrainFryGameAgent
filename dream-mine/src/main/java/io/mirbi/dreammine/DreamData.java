@@ -185,6 +185,11 @@ public final class DreamData extends SavedData {
         if(learnt.length==result.sharedCortexReadout.length)
             for(int i=0;i<learnt.length;i++)
                 result.sharedCortexReadout[i]=Math.max(-2f,Math.min(2f,learnt[i]/32767f));
+        else if(learnt.length==EmbeddedH01.ACTIONS*12) { // pre-sensor migration
+            for(int a=0;a<EmbeddedH01.ACTIONS;a++)for(int i=0;i<12;i++)
+                result.sharedCortexReadout[a*EmbeddedH01.INPUTS+i]=
+                    Math.max(-2f,Math.min(2f,learnt[a*12+i]/32767f));
+        }
         result.corticalContributions=Math.max(0,tag.getInt("corticalContributions"));
         CompoundTag blocks = tag.getCompound("blocks");
         for (String key : blocks.getAllKeys()) if (result.visitedBlocks.size() < 256)

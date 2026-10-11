@@ -153,6 +153,7 @@ public final class DreamMine {
         e.getDispatcher().register(Commands.literal("dreammine")
             .then(Commands.literal("status").executes(ctx -> status(ctx.getSource())))
             .then(Commands.literal("brain").executes(ctx -> brainStatus(ctx.getSource())))
+            .then(Commands.literal("senses").executes(ctx -> sensesStatus(ctx.getSource())))
             .then(Commands.literal("actions").requires(src->src.hasPermission(2))
                 .then(Commands.literal("on").executes(ctx -> worldActions(ctx.getSource(),true)))
                 .then(Commands.literal("off").executes(ctx -> worldActions(ctx.getSource(),false))))
@@ -222,6 +223,21 @@ public final class DreamMine {
         DreamData.get(src.getServer()).setWorldActions(enabled);
         src.sendSuccess(()->Component.literal(
             "Dream Minecraft block interactions: "+(enabled?"ON (trees may be harvested, crafting tables placed)":"OFF")),true);
+        return 1;
+    }
+    private static int sensesStatus(CommandSourceStack src) {
+        if(!(src.getEntity() instanceof ServerPlayer player))return 0;
+        FakePlayerEntity found=null;
+        double dist=64*64;
+        for(UUID id:DreamData.get(src.getServer()).livingIds()){
+            Entity e=player.serverLevel().getEntity(id);
+            if(!(e instanceof FakePlayerEntity candidate)||!owned(candidate))continue;
+            double d=player.distanceToSqr(candidate);
+            if(d<dist){dist=d;found=candidate;}
+        }
+        if(found==null){src.sendFailure(Component.literal("No Dream within 64 blocks"));return 0;}
+        String result=DreamWork.senses(found);
+        src.sendSuccess(()->Component.literal(result),false);
         return 1;
     }
     private static int brainStatus(CommandSourceStack src) {

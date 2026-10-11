@@ -14,7 +14,7 @@ import java.util.Random;
  */
 public final class EmbeddedH01 {
     public static final int MODULES=8, COLUMNS=96, FANOUT=8;
-    public static final int INPUTS=12, ACTIONS=5;
+    public static final int INPUTS=DreamSensory.SIZE, ACTIONS=5;
     public static final String[] ACTION_NAMES={"EXPLORE","GATHER_WOOD","CRAFT_PLANKS","BUILD_MARKER","OBSERVE_PLAYER"};
     private static final int EDGES=MODULES*COLUMNS*FANOUT;
     private static final double WEIGHT_SCALE=32767.0;
@@ -28,6 +28,7 @@ public final class EmbeddedH01 {
     private final float[][] readout=new float[ACTIONS][INPUTS];
     private final float[][] readoutEligibility=new float[ACTIONS][INPUTS];
     private float[] lastSensors=new float[INPUTS];
+    private float[] actionSensors=new float[INPUTS];
     private int lastAction=-1;
     private long steps,reinforcements;
     private float lastActivation;
@@ -49,10 +50,15 @@ public final class EmbeddedH01 {
             readout[a][i]=(random.nextFloat()-.5f)*.04f;
     }
     public static float[] sanitize(float[] sensors){
-        if(sensors==null||sensors.length!=INPUTS)throw new IllegalArgumentException("expected 12 sensory values");
+        if(sensors==null||sensors.length!=INPUTS)throw new IllegalArgumentException("expected "+INPUTS+" sensory values");
         float[] copy=Arrays.copyOf(sensors,INPUTS);
         for(int i=0;i<INPUTS;i++)copy[i]=Float.isFinite(copy[i])?Math.max(-1,Math.min(1,copy[i])):0;
         return copy;
+    }
+    /** Continuous recurrent sensory activity, including while navigating; no action selected. */
+    public void senseFrame(float[] senses){
+        lastSensors=sanitize(senses);
+        pulse(lastSensors);
     }
     /** One physically grounded perception -> recurrent update -> masked decision. */
     public int choose(float[] senses,boolean[] feasible){
@@ -76,6 +82,7 @@ public final class EmbeddedH01 {
             if(activation>best){best=activation;action=a;}
         }
         lastAction=action;
+        if(action>=0) actionSensors=Arrays.copyOf(lastSensors,INPUTS);
         return action;
     }
     private void pulse(float[] senses){
@@ -116,8 +123,8 @@ public final class EmbeddedH01 {
         scalar=Math.max(-1f,Math.min(1f,scalar));
         for(int k=0;k<INPUTS;k++){
             readoutEligibility[lastAction][k]=
-                Math.min(1f,readoutEligibility[lastAction][k]*.82f+Math.abs(lastSensors[k])*.28f);
-            float sign=Math.signum(lastSensors[k]);
+                Math.min(1f,readoutEligibility[lastAction][k]*.82f+Math.abs(actionSensors[k])*.28f);
+            float sign=Math.signum(actionSensors[k]);
             readout[lastAction][k]=clamp(
                 readout[lastAction][k]+.04f*scalar*readoutEligibility[lastAction][k]*sign,-2,2);
         }
@@ -181,6 +188,10 @@ public final class EmbeddedH01 {
         int[] r=nbt.getIntArray("readout");
         if(r.length==ACTIONS*INPUTS)for(int i=0;i<ACTIONS;i++)for(int j=0;j<INPUTS;j++)
             readout[i][j]=clamp((float)(r[i*INPUTS+j]/WEIGHT_SCALE),-2,2);
+        else if(r.length==ACTIONS*12) { // v0.2.0 migration of the original 12 inputs
+            for(int i=0;i<ACTIONS;i++)for(int j=0;j<12;j++)
+                readout[i][j]=clamp((float)(r[i*12+j]/WEIGHT_SCALE),-2,2);
+        }
         steps=Math.max(0,nbt.getLong("steps"));
         reinforcements=Math.max(0,nbt.getLong("reinforcements"));
     }
