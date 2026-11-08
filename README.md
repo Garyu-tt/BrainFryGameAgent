@@ -91,4 +91,4 @@ The example moves a separate Mineflayer test bot, detects nearby hostile entitie
 
 No logins, API keys, game world saves, private memories, neurostate, source anatomy binaries or model weights are in this release. Persistent fly state stays in the chosen `--state-dir` and must remain private. For the research-only Noosphere resident, consult `flygame/research/README.md`.
 
-License: no new license grant is asserted by this update; repository owner should explicitly choose a license before third-party reuse/distribution.
+License: this release of original project code is distributed under GNU GPLv3 or later (`GPL-3.0-or-later`). Copyright (C) 2026 Garyu-tt. See [LICENSE](LICENSE) and [AUTHORS.md](AUTHORS.md). Third-party connectome data is not included; preserve original data and code licenses.
